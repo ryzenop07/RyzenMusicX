@@ -1,10 +1,8 @@
 import os
-import tempfile
-import shutil
+import asyncio
 from random import randint
 from typing import Union
 
-import ffmpeg
 from pyrogram.types import InlineKeyboardMarkup
 
 import config
@@ -18,27 +16,10 @@ from AviaxMusic.utils.pastebin import AviaxBin
 from AviaxMusic.utils.stream.queue import put_queue, put_queue_index
 from AviaxMusic.utils.thumbnails import gen_thumb
 
+# 🔹 Helper: Apply on-the-fly FFmpeg filters
+def ffmpeg_opts():
+    return config.BASS_BOOST if hasattr(config, "BASS_BOOST") else None
 
-# ---------------- Helper: Apply Bass + Volume Boost ----------------
-async def apply_bass_boost(input_file: str) -> str:
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    tmp_file_path = tmp_file.name
-    tmp_file.close()
-    try:
-        (
-            ffmpeg
-            .input(input_file)
-            .output(tmp_file_path, af=config.BASS_BOOST, format="mp3")
-            .overwrite_output()
-            .run(quiet=True)
-        )
-        return tmp_file_path
-    except Exception as e:
-        print(f"[FFMPEG ERROR] {e}")
-        return input_file  # fallback if processing fails
-
-
-# ---------------- Stream Function ----------------
 async def stream(
     _,
     mystic,
@@ -54,10 +35,26 @@ async def stream(
 ):
     if not result:
         return
+
     if forceplay:
         await Aviax.force_stop_stream(chat_id)
 
-    # ---------------- Playlist Stream ----------------
+    async def add_to_queue(file, title, dur, vidid=None, streamtype_local="audio"):
+        """Add song to queue instantly"""
+        await put_queue(
+            chat_id,
+            original_chat_id,
+            file,
+            title,
+            dur,
+            user_name,
+            vidid if vidid else streamtype_local,
+            user_id,
+            "video" if video else "audio",
+            forceplay=forceplay,
+        )
+
+    # 🔹 PLAYLIST
     if streamtype == "playlist":
         msg = f"{_['play_19']}\n\n"
         count = 0
@@ -71,84 +68,85 @@ async def stream(
             if str(duration_min) == "None" or duration_sec > config.DURATION_LIMIT:
                 continue
 
+            # 🔹 Instant queue insert if song already playing
             if await is_active_chat(chat_id):
-                await put_queue(chat_id, original_chat_id, f"vid_{vidid}", title, duration_min, user_name, vidid, user_id, "video" if video else "audio")
+                await add_to_queue(f"vid_{vidid}", title, duration_min, vidid)
                 position = len(db.get(chat_id)) - 1
                 count += 1
-                msg += f"{count}. {title[:70]}\n"
-                msg += f"{_['play_20']} {position}\n\n"
+                msg += f"{count}. {title[:70]}\n{_['play_20']} {position}\n\n"
             else:
-                if not forceplay:
-                    db[chat_id] = []
-                status = True if video else None
-                try:
-                    file_path, direct = await YouTube.download(vidid, mystic, video=status, videoid=True)
-                except:
-                    raise AssistantErr(_["play_14"])
-
-                # Apply Bass Boost
-                processed_file = await apply_bass_boost(file_path)
-
-                await Aviax.join_call(chat_id, original_chat_id, processed_file, video=status, image=thumbnail)
-                await put_queue(chat_id, original_chat_id, processed_file if direct else f"vid_{vidid}", title, duration_min, user_name, vidid, user_id, "video" if video else "audio", forceplay=forceplay)
-
+                file_path, direct = await YouTube.download(vidid, mystic, video=True if video else None, videoid=True)
+                # 🔹 Stream directly with FFmpeg filters
+                await Aviax.join_call(chat_id, original_chat_id, file_path, video=True if video else None, ffmpeg_filters=ffmpeg_opts())
+                await add_to_queue(file_path if direct else f"vid_{vidid}", title, duration_min, vidid)
                 img = await gen_thumb(vidid)
                 button = stream_markup(_, chat_id)
                 run = await app.send_photo(original_chat_id, photo=img, caption=_["stream_1"].format(f"https://t.me/{app.username}?start=info_{vidid}", title[:23], duration_min, user_name), reply_markup=InlineKeyboardMarkup(button))
                 db[chat_id][0]["mystic"] = run
                 db[chat_id][0]["markup"] = "stream"
-
         if count == 0:
             return
         else:
             link = await AviaxBin(msg)
-            lines = msg.count("\n")
-            car = os.linesep.join(msg.split(os.linesep)[:17]) if lines >= 17 else msg
-            carbon = await Carbon.generate(car, randint(100, 10000000))
+            carbon = await Carbon.generate(msg, randint(100, 10000000))
             upl = close_markup(_)
             return await app.send_photo(original_chat_id, photo=carbon, caption=_["play_21"].format(position, link), reply_markup=upl)
 
-    # ---------------- YouTube Stream ----------------
-    elif streamtype == "youtube":
-        link = result["link"]
-        vidid = result["vidid"]
-        title = (result["title"]).title()
-        duration_min = result["duration_min"]
-        thumbnail = result["thumb"]
-        status = True if video else None
-
-        current_queue = db.get(chat_id)
-        if current_queue is not None and len(current_queue) >= 10:
-            return await app.send_message(original_chat_id, "You can't add more than 10 songs to the queue.")
-
-        try:
+    # 🔹 YOUTUBE / SOUND / TELEGRAM / LIVE / INDEX
+    elif streamtype in ["youtube", "soundcloud", "telegram", "live", "index"]:
+        # Simplified logic: direct streaming + instant queue
+        if streamtype == "youtube":
+            link = result["link"]
+            vidid = result["vidid"]
+            title = (result["title"]).title()
+            duration_min = result["duration_min"]
+            thumbnail = result["thumb"]
+            status = True if video else None
             file_path, direct = await YouTube.download(vidid, mystic, videoid=True, video=status)
-        except:
-            raise AssistantErr(_["play_14"])
 
+        elif streamtype == "soundcloud":
+            file_path = result["filepath"]
+            title = result["title"]
+            duration_min = result["duration_min"]
+            status = None
+
+        elif streamtype == "telegram":
+            file_path = result["path"]
+            title = (result["title"]).title()
+            duration_min = result["dur"]
+            status = True if video else None
+
+        elif streamtype == "live":
+            link = result["link"]
+            vidid = result["vidid"]
+            title = (result["title"]).title()
+            duration_min = "Live Track"
+            thumbnail = result.get("thumb")
+            n, file_path = await YouTube.video(link)
+            if n == 0:
+                raise AssistantErr(_["str_3"])
+            status = True if video else None
+
+        elif streamtype == "index":
+            file_path = result
+            title = "Index / m3u8 Link"
+            duration_min = "00:00"
+            status = True if video else None
+
+        # 🔹 Instant queue insert if playing
         if await is_active_chat(chat_id):
-            await put_queue(chat_id, original_chat_id, file_path if direct else f"vid_{vidid}", title, duration_min, user_name, vidid, user_id, "video" if video else "audio")
+            await add_to_queue(file_path if 'file_path' in locals() else file_path, title, duration_min, vidid if 'vidid' in locals() else None, streamtype)
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
             await app.send_message(chat_id=original_chat_id, text=_["queue_4"].format(position, title[:27], duration_min, user_name), reply_markup=InlineKeyboardMarkup(button))
         else:
             if not forceplay:
                 db[chat_id] = []
-
-            processed_file = await apply_bass_boost(file_path)
-            await Aviax.join_call(chat_id, original_chat_id, processed_file, video=status, image=thumbnail)
-            await put_queue(chat_id, original_chat_id, processed_file if direct else f"vid_{vidid}", title, duration_min, user_name, vidid, user_id, "video" if video else "audio", forceplay=forceplay)
-            img = await gen_thumb(vidid)
+            await Aviax.join_call(chat_id, original_chat_id, file_path if 'file_path' in locals() else file_path, video=status, ffmpeg_filters=ffmpeg_opts(), image=thumbnail if 'thumbnail' in locals() else None)
+            await add_to_queue(file_path if 'file_path' in locals() else file_path, title, duration_min, vidid if 'vidid' in locals() else None, streamtype)
+            if video and streamtype == "telegram":
+                await add_active_video_chat(chat_id)
             button = stream_markup(_, chat_id)
-            run = await app.send_photo(original_chat_id, photo=img, caption=_["stream_1"].format(f"https://t.me/{app.username}?start=info_{vidid}", title[:23], duration_min, user_name), reply_markup=InlineKeyboardMarkup(button))
+            run = await app.send_photo(original_chat_id, photo=thumbnail if 'thumbnail' in locals() else config.STREAM_IMG_URL, caption=_["stream_1"].format(link if 'link' in locals() else file_path, title[:23], duration_min, user_name), reply_markup=InlineKeyboardMarkup(button))
             db[chat_id][0]["mystic"] = run
-            db[chat_id][0]["markup"] = "stream"
-
-    # ---------------- Other Stream Types ----------------
-    # soundcloud / telegram / live / index
-    # You can repeat the same approach:
-    # 1. Download or get file path
-    # 2. Apply bass boost: processed_file = await apply_bass_boost(file_path)
-    # 3. Pass processed_file to Aviax.join_call
-    # 4. Update queue and send inline buttons
-
+            db[chat_id][0]["markup"] = "tg"
