@@ -1,98 +1,480 @@
-import asyncio
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup
+import os
+from random import randint
+from typing import Union
 
-from AviaxMusic.utils.stream.queue import put_queue
-from AviaxMusic.misc import db
-from AviaxMusic.utils.inline.play import aq_markup
-from AviaxMusic.platforms.Youtube import YouTubeAPI
-from config import autoclean
+from pyrogram.types import InlineKeyboardMarkup
+import ffmpeg
 
-# Assume Aviax is your voice call manager
+import config
+from AviaxMusic import Carbon, YouTube, app
 from AviaxMusic.core.call import Aviax
+from AviaxMusic.misc import db
+from AviaxMusic.utils.database import add_active_video_chat, is_active_chat
+from AviaxMusic.utils.exceptions import AssistantErr
+from AviaxMusic.utils.inline import aq_markup, close_markup, stream_markup
+from AviaxMusic.utils.pastebin import AviaxBin
+from AviaxMusic.utils.stream.queue import put_queue, put_queue_index
+from AviaxMusic.utils.thumbnails import gen_thumb
 
 
-@Client.on_message(filters.command(["play", "vplay", "cplay"]))
-async def play_handler(client: Client, message: Message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    user_name = message.from_user.mention
-
-    query = ""
-    if len(message.command) > 1:
-        query = message.text.split(None, 1)[1]
-    elif message.reply_to_message and message.reply_to_message.audio:
-        query = message.reply_to_message.audio.file_id
-    else:
-        await message.reply("❌ Please provide a song name or link.")
-        return
-
-    video = "vplay" in message.command  # detect if video play requested
-    forceplay = "cplay" in message.command
-
-    yt = YouTubeAPI()
-
+# 🔹 Helper: Apply Bass + Volume Boost
+async def apply_bass_boost(input_file: str) -> str:
+    """
+    Takes an audio file and applies bass + volume filter.
+    Returns new processed file path.
+    """
+    output_file = f"processed_{os.path.basename(input_file)}.wav"
     try:
-        # Fetch song details
-        if "youtube.com" in query or "youtu.be" in query:
-            title, duration_min, duration_sec, thumb, vidid = await yt.details(query)
-            file, direct = await yt.download(query, message)
+        (
+            ffmpeg
+            .input(input_file)
+            .output(output_file, af=config.BASS_BOOST, format="wav")
+            .overwrite_output()
+            .run(quiet=True)
+        )
+        return output_file
+    except Exception as e:
+        print(f"[FFMPEG ERROR] {e}")
+        return input_file
+
+
+async def stream(
+    _,
+    mystic,
+    user_id,
+    result,
+    chat_id,
+    user_name,
+    original_chat_id,
+    video: Union[bool, str] = None,
+    streamtype: Union[bool, str] = None,
+    spotify: Union[bool, str] = None,
+    forceplay: Union[bool, str] = None,
+):
+    if not result:
+        return
+    if forceplay:
+        await Aviax.force_stop_stream(chat_id)
+
+    if streamtype == "playlist":
+        msg = f"{_['play_19']}\n\n"
+        count = 0
+        for search in result:
+            if int(count) == config.PLAYLIST_FETCH_LIMIT:
+                continue
+            try:
+                (
+                    title,
+                    duration_min,
+                    duration_sec,
+                    thumbnail,
+                    vidid,
+                ) = await YouTube.details(search, False if spotify else True)
+            except:
+                continue
+            if str(duration_min) == "None":
+                continue
+            if duration_sec > config.DURATION_LIMIT:
+                continue
+            if await is_active_chat(chat_id):
+                await put_queue(
+                    chat_id,
+                    original_chat_id,
+                    f"vid_{vidid}",
+                    title,
+                    duration_min,
+                    user_name,
+                    vidid,
+                    user_id,
+                    "video" if video else "audio",
+                )
+                position = len(db.get(chat_id)) - 1
+                count += 1
+                msg += f"{count}. {title[:70]}\n"
+                msg += f"{_['play_20']} {position}\n\n"
+            else:
+                if not forceplay:
+                    db[chat_id] = []
+                status = True if video else None
+                try:
+                    file_path, direct = await YouTube.download(
+                        vidid, mystic, video=status, videoid=True
+                    )
+                except:
+                    raise AssistantErr(_["play_14"])
+
+                # Apply Bass Boost
+                processed_file = await apply_bass_boost(file_path)
+
+                await Aviax.join_call(
+                    chat_id,
+                    original_chat_id,
+                    processed_file,
+                    video=status,
+                    image=thumbnail,
+                )
+                await put_queue(
+                    chat_id,
+                    original_chat_id,
+                    processed_file if direct else f"vid_{vidid}",
+                    title,
+                    duration_min,
+                    user_name,
+                    vidid,
+                    user_id,
+                    "video" if video else "audio",
+                    forceplay=forceplay,
+                )
+                img = await gen_thumb(vidid)
+                button = stream_markup(_, chat_id)
+                run = await app.send_photo(
+                    original_chat_id,
+                    photo=img,
+                    caption=_["stream_1"].format(
+                        f"https://t.me/{app.username}?start=info_{vidid}",
+                        title[:23],
+                        duration_min,
+                        user_name,
+                    ),
+                    reply_markup=InlineKeyboardMarkup(button),
+                )
+                db[chat_id][0]["mystic"] = run
+                db[chat_id][0]["markup"] = "stream"
+        if count == 0:
+            return
         else:
-            # Treat as search query
-            title, duration_min, duration_sec, thumb, vidid = await yt.details(query)
-            file, direct = await yt.download(f"https://www.youtube.com/watch?v={vidid}", message)
+            link = await AviaxBin(msg)
+            lines = msg.count("\n")
+            if lines >= 17:
+                car = os.linesep.join(msg.split(os.linesep)[:17])
+            else:
+                car = msg
+            carbon = await Carbon.generate(car, randint(100, 10000000))
+            upl = close_markup(_)
+            return await app.send_photo(
+                original_chat_id,
+                photo=carbon,
+                caption=_["play_21"].format(position, link),
+                reply_markup=upl,
+            )
 
-    except Exception as e:
-        await message.reply(f"❌ Failed to fetch song: {e}")
-        return
+    elif streamtype == "youtube":
+        link = result["link"]
+        vidid = result["vidid"]
+        title = (result["title"]).title()
+        duration_min = result["duration_min"]
+        thumbnail = result["thumb"]
+        status = True if video else None
 
-    # ✅ FAST QUEUE: if something already playing
-    if db.get(chat_id) and len(db[chat_id]) > 0:
-        await put_queue(
-            chat_id,
-            chat_id,
-            file,
-            title,
-            duration_min,
-            user_name,
-            vidid,
-            user_id,
-            "video" if video else "audio",
-            forceplay=forceplay,
-        )
-        pos = len(db.get(chat_id)) - 1
-        buttons = aq_markup("en", chat_id)
-        await message.reply_text(
-            f"🎶 Added to queue at position #{pos}\n\n**{title[:40]}**\n⏱️ {duration_min} | 👤 {user_name}",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-        return
+        current_queue = db.get(chat_id)
+        if current_queue is not None and len(current_queue) >= 10:
+            return await app.send_message(original_chat_id, "You can't add more than 10 songs to the queue.")
 
-    # ✅ Nothing playing: Start instantly
-    try:
-        await Aviax.join_call(
-            chat_id,
-            file,
-            video=video,
-        )
-        await put_queue(
-            chat_id,
-            chat_id,
-            file,
-            title,
-            duration_min,
-            user_name,
-            vidid,
-            user_id,
-            "video" if video else "audio",
-            forceplay=True,
-        )
+        try:
+            file_path, direct = await YouTube.download(
+                vidid, mystic, videoid=True, video=status
+            )
+        except:
+            raise AssistantErr(_["play_14"])
 
-        buttons = aq_markup("en", chat_id)
-        await message.reply_text(
-            f"▶️ Now playing\n\n**{title[:40]}**\n⏱️ {duration_min} | 👤 {user_name}",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-    except Exception as e:
-        await message.reply(f"⚠️ Failed to start playback: {e}")
-        return
+        if await is_active_chat(chat_id):
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                file_path if direct else f"vid_{vidid}",
+                title,
+                duration_min,
+                user_name,
+                vidid,
+                user_id,
+                "video" if video else "audio",
+            )
+            position = len(db.get(chat_id)) - 1
+            button = aq_markup(_, chat_id)
+            await app.send_message(
+                chat_id=original_chat_id,
+                text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+        else:
+            if not forceplay:
+                db[chat_id] = []
+
+            # Apply Bass Boost
+            processed_file = await apply_bass_boost(file_path)
+
+            await Aviax.join_call(
+                chat_id,
+                original_chat_id,
+                processed_file,
+                video=status,
+                image=thumbnail,
+            )
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                processed_file if direct else f"vid_{vidid}",
+                title,
+                duration_min,
+                user_name,
+                vidid,
+                user_id,
+                "video" if video else "audio",
+                forceplay=forceplay,
+            )
+            img = await gen_thumb(vidid)
+            button = stream_markup(_, chat_id)
+            run = await app.send_photo(
+                original_chat_id,
+                photo=img,
+                caption=_["stream_1"].format(
+                    f"https://t.me/{app.username}?start=info_{vidid}",
+                    title[:23],
+                    duration_min,
+                    user_name,
+                ),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+            db[chat_id][0]["mystic"] = run
+            db[chat_id][0]["markup"] = "stream"
+
+    elif streamtype == "soundcloud":
+        file_path = result["filepath"]
+        title = result["title"]
+        duration_min = result["duration_min"]
+
+        if await is_active_chat(chat_id):
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                file_path,
+                title,
+                duration_min,
+                user_name,
+                streamtype,
+                user_id,
+                "audio",
+            )
+            position = len(db.get(chat_id)) - 1
+            button = aq_markup(_, chat_id)
+            await app.send_message(
+                chat_id=original_chat_id,
+                text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+        else:
+            if not forceplay:
+                db[chat_id] = []
+
+            # Apply Bass Boost
+            processed_file = await apply_bass_boost(file_path)
+
+            await Aviax.join_call(chat_id, original_chat_id, processed_file, video=None)
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                processed_file,
+                title,
+                duration_min,
+                user_name,
+                streamtype,
+                user_id,
+                "audio",
+                forceplay=forceplay,
+            )
+            button = stream_markup(_, chat_id)
+            run = await app.send_photo(
+                original_chat_id,
+                photo=config.SOUNCLOUD_IMG_URL,
+                caption=_["stream_1"].format(
+                    config.SUPPORT_GROUP, title[:23], duration_min, user_name
+                ),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+            db[chat_id][0]["mystic"] = run
+            db[chat_id][0]["markup"] = "tg"
+
+    elif streamtype == "telegram":
+        file_path = result["path"]
+        link = result["link"]
+        title = (result["title"]).title()
+        duration_min = result["dur"]
+        status = True if video else None
+
+        if await is_active_chat(chat_id):
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                file_path,
+                title,
+                duration_min,
+                user_name,
+                streamtype,
+                user_id,
+                "video" if video else "audio",
+            )
+            position = len(db.get(chat_id)) - 1
+            button = aq_markup(_, chat_id)
+            await app.send_message(
+                chat_id=original_chat_id,
+                text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+        else:
+            if not forceplay:
+                db[chat_id] = []
+
+            # Apply Bass Boost
+            processed_file = await apply_bass_boost(file_path)
+
+            await Aviax.join_call(chat_id, original_chat_id, processed_file, video=status)
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                processed_file,
+                title,
+                duration_min,
+                user_name,
+                streamtype,
+                user_id,
+                "video" if video else "audio",
+                forceplay=forceplay,
+            )
+            if video:
+                await add_active_video_chat(chat_id)
+            button = stream_markup(_, chat_id)
+            run = await app.send_photo(
+                original_chat_id,
+                photo=config.TELEGRAM_VIDEO_URL if video else config.TELEGRAM_AUDIO_URL,
+                caption=_["stream_1"].format(link, title[:23], duration_min, user_name),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+            db[chat_id][0]["mystic"] = run
+            db[chat_id][0]["markup"] = "tg"
+
+    elif streamtype == "live":
+        link = result["link"]
+        vidid = result["vidid"]
+        title = (result["title"]).title()
+        thumbnail = result["thumb"]
+        duration_min = "Live Track"
+        status = True if video else None
+
+        if await is_active_chat(chat_id):
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                f"live_{vidid}",
+                title,
+                duration_min,
+                user_name,
+                vidid,
+                user_id,
+                "video" if video else "audio",
+            )
+            position = len(db.get(chat_id)) - 1
+            button = aq_markup(_, chat_id)
+            await app.send_message(
+                chat_id=original_chat_id,
+                text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+        else:
+            if not forceplay:
+                db[chat_id] = []
+            n, file_path = await YouTube.video(link)
+            if n == 0:
+                raise AssistantErr(_["str_3"])
+
+            # Apply Bass Boost
+            processed_file = await apply_bass_boost(file_path)
+
+            await Aviax.join_call(
+                chat_id,
+                original_chat_id,
+                processed_file,
+                video=status,
+                image=thumbnail if thumbnail else None,
+            )
+            await put_queue(
+                chat_id,
+                original_chat_id,
+                f"live_{vidid}",
+                title,
+                duration_min,
+                user_name,
+                vidid,
+                user_id,
+                "video" if video else "audio",
+                forceplay=forceplay,
+            )
+            img = await gen_thumb(vidid)
+            button = stream_markup(_, chat_id)
+            run = await app.send_photo(
+                original_chat_id,
+                photo=img,
+                caption=_["stream_1"].format(
+                    f"https://t.me/{app.username}?start=info_{vidid}",
+                    title[:23],
+                    duration_min,
+                    user_name,
+                ),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+            db[chat_id][0]["mystic"] = run
+            db[chat_id][0]["markup"] = "tg"
+
+    elif streamtype == "index":
+        link = result
+        title = "ɪɴᴅᴇx ᴏʀ ᴍ3ᴜ8 ʟɪɴᴋ"
+        duration_min = "00:00"
+
+        if await is_active_chat(chat_id):
+            await put_queue_index(
+                chat_id,
+                original_chat_id,
+                "index_url",
+                title,
+                duration_min,
+                user_name,
+                link,
+                "video" if video else "audio",
+            )
+            position = len(db.get(chat_id)) - 1
+            button = aq_markup(_, chat_id)
+            await mystic.edit_text(
+                text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+        else:
+            if not forceplay:
+                db[chat_id] = []
+
+            # Live/index stream cannot be modified, pass directly
+            await Aviax.join_call(
+                chat_id,
+                original_chat_id,
+                link,
+                video=True if video else None,
+            )
+            await put_queue_index(
+                chat_id,
+                original_chat_id,
+                "index_url",
+                title,
+                duration_min,
+                user_name,
+                link,
+                "video" if video else "audio",
+                forceplay=forceplay,
+            )
+            button = stream_markup(_, chat_id)
+            run = await app.send_photo(
+                original_chat_id,
+                photo=config.STREAM_IMG_URL,
+                caption=_["stream_2"].format(user_name),
+                reply_markup=InlineKeyboardMarkup(button),
+            )
+            db[chat_id][0]["mystic"] = run
+            db[chat_id][0]["markup"] = "tg"
+            await mystic.delete()
