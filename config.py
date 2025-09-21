@@ -12,6 +12,9 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 # Bass + Volume Boost Filter
 BASS_BOOST = "bass=g=15,volume=2,equalizer=f=40:width_type=h:width=50:g=10"
+# FFMPEG live audio filters
+LIVE_AUDIO_FILTER = "bass=g=10,dynaudnorm=f=200"  # Example: bass boost + dynamic audio normalization
+
 
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
@@ -92,4 +95,5 @@ if SUPPORT_CHANNEL and not re.match(r"^(http|https)://", SUPPORT_CHANNEL):
 
 if SUPPORT_GROUP and not re.match(r"^(http|https)://", SUPPORT_GROUP):
     raise SystemExit("[ERROR] - Your SUPPORT_GROUP url is invalid. Must start with http(s)://")
+
 
