@@ -3,39 +3,17 @@ from random import randint
 from typing import Union
 
 from pyrogram.types import InlineKeyboardMarkup
-import ffmpeg
 
 import config
-from AviaxMusic import Carbon, YouTube, app
-from AviaxMusic.core.call import Aviax
-from AviaxMusic.misc import db
-from AviaxMusic.utils.database import add_active_video_chat, is_active_chat
-from AviaxMusic.utils.exceptions import AssistantErr
-from AviaxMusic.utils.inline import aq_markup, close_markup, stream_markup
-from AviaxMusic.utils.pastebin import AviaxBin
-from AviaxMusic.utils.stream.queue import put_queue, put_queue_index
-from AviaxMusic.utils.thumbnails import gen_thumb
-
-
-# 🔹 Helper: Apply Bass + Volume Boost
-async def apply_bass_boost(input_file: str) -> str:
-    """
-    Takes an audio file and applies bass + volume filter.
-    Returns new processed file path.
-    """
-    output_file = f"processed_{os.path.basename(input_file)}.wav"
-    try:
-        (
-            ffmpeg
-            .input(input_file)
-            .output(output_file, af=config.BASS_BOOST, format="wav")
-            .overwrite_output()
-            .run(quiet=True)
-        )
-        return output_file
-    except Exception as e:
-        print(f"[FFMPEG ERROR] {e}")
-        return input_file
+from AnonXMusic import Carbon, YouTube, app
+from AnonXMusic.core.call import Anony
+from AnonXMusic.misc import db
+from AnonXMusic.utils.database import add_active_video_chat, is_active_chat
+from AnonXMusic.utils.exceptions import AssistantErr
+from AnonXMusic.utils.inline import aq_markup, close_markup, stream_markup
+from AnonXMusic.utils.pastebin import AnonyBin
+from AnonXMusic.utils.stream.queue import put_queue, put_queue_index
+from AnonXMusic.utils.thumbnails import get_thumb
 
 
 async def stream(
@@ -54,8 +32,7 @@ async def stream(
     if not result:
         return
     if forceplay:
-        await Aviax.force_stop_stream(chat_id)
-
+        await Anony.force_stop_stream(chat_id)
     if streamtype == "playlist":
         msg = f"{_['play_19']}\n\n"
         count = 0
@@ -102,21 +79,17 @@ async def stream(
                     )
                 except:
                     raise AssistantErr(_["play_14"])
-
-                # Apply Bass Boost
-                processed_file = await apply_bass_boost(file_path)
-
-                await Aviax.join_call(
+                await Anony.join_call(
                     chat_id,
                     original_chat_id,
-                    processed_file,
+                    file_path,
                     video=status,
                     image=thumbnail,
                 )
                 await put_queue(
                     chat_id,
                     original_chat_id,
-                    processed_file if direct else f"vid_{vidid}",
+                    file_path if direct else f"vid_{vidid}",
                     title,
                     duration_min,
                     user_name,
@@ -125,7 +98,7 @@ async def stream(
                     "video" if video else "audio",
                     forceplay=forceplay,
                 )
-                img = await gen_thumb(vidid)
+                img = await get_thumb(vidid)
                 button = stream_markup(_, chat_id)
                 run = await app.send_photo(
                     original_chat_id,
@@ -143,7 +116,7 @@ async def stream(
         if count == 0:
             return
         else:
-            link = await AviaxBin(msg)
+            link = await AnonyBin(msg)
             lines = msg.count("\n")
             if lines >= 17:
                 car = os.linesep.join(msg.split(os.linesep)[:17])
@@ -157,7 +130,6 @@ async def stream(
                 caption=_["play_21"].format(position, link),
                 reply_markup=upl,
             )
-
     elif streamtype == "youtube":
         link = result["link"]
         vidid = result["vidid"]
@@ -165,18 +137,12 @@ async def stream(
         duration_min = result["duration_min"]
         thumbnail = result["thumb"]
         status = True if video else None
-
-        current_queue = db.get(chat_id)
-        if current_queue is not None and len(current_queue) >= 10:
-            return await app.send_message(original_chat_id, "You can't add more than 10 songs to the queue.")
-
         try:
             file_path, direct = await YouTube.download(
                 vidid, mystic, videoid=True, video=status
             )
         except:
             raise AssistantErr(_["play_14"])
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -199,21 +165,17 @@ async def stream(
         else:
             if not forceplay:
                 db[chat_id] = []
-
-            # Apply Bass Boost
-            processed_file = await apply_bass_boost(file_path)
-
-            await Aviax.join_call(
+            await Anony.join_call(
                 chat_id,
                 original_chat_id,
-                processed_file,
+                file_path,
                 video=status,
                 image=thumbnail,
             )
             await put_queue(
                 chat_id,
                 original_chat_id,
-                processed_file if direct else f"vid_{vidid}",
+                file_path if direct else f"vid_{vidid}",
                 title,
                 duration_min,
                 user_name,
@@ -222,7 +184,7 @@ async def stream(
                 "video" if video else "audio",
                 forceplay=forceplay,
             )
-            img = await gen_thumb(vidid)
+            img = await get_thumb(vidid)
             button = stream_markup(_, chat_id)
             run = await app.send_photo(
                 original_chat_id,
@@ -237,12 +199,10 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "stream"
-
     elif streamtype == "soundcloud":
         file_path = result["filepath"]
         title = result["title"]
         duration_min = result["duration_min"]
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -265,15 +225,11 @@ async def stream(
         else:
             if not forceplay:
                 db[chat_id] = []
-
-            # Apply Bass Boost
-            processed_file = await apply_bass_boost(file_path)
-
-            await Aviax.join_call(chat_id, original_chat_id, processed_file, video=None)
+            await Anony.join_call(chat_id, original_chat_id, file_path, video=None)
             await put_queue(
                 chat_id,
                 original_chat_id,
-                processed_file,
+                file_path,
                 title,
                 duration_min,
                 user_name,
@@ -287,20 +243,18 @@ async def stream(
                 original_chat_id,
                 photo=config.SOUNCLOUD_IMG_URL,
                 caption=_["stream_1"].format(
-                    config.SUPPORT_GROUP, title[:23], duration_min, user_name
+                    config.SUPPORT_CHAT, title[:23], duration_min, user_name
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     elif streamtype == "telegram":
         file_path = result["path"]
         link = result["link"]
         title = (result["title"]).title()
         duration_min = result["dur"]
         status = True if video else None
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -323,15 +277,11 @@ async def stream(
         else:
             if not forceplay:
                 db[chat_id] = []
-
-            # Apply Bass Boost
-            processed_file = await apply_bass_boost(file_path)
-
-            await Aviax.join_call(chat_id, original_chat_id, processed_file, video=status)
+            await Anony.join_call(chat_id, original_chat_id, file_path, video=status)
             await put_queue(
                 chat_id,
                 original_chat_id,
-                processed_file,
+                file_path,
                 title,
                 duration_min,
                 user_name,
@@ -351,7 +301,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     elif streamtype == "live":
         link = result["link"]
         vidid = result["vidid"]
@@ -359,7 +308,6 @@ async def stream(
         thumbnail = result["thumb"]
         duration_min = "Live Track"
         status = True if video else None
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -385,14 +333,10 @@ async def stream(
             n, file_path = await YouTube.video(link)
             if n == 0:
                 raise AssistantErr(_["str_3"])
-
-            # Apply Bass Boost
-            processed_file = await apply_bass_boost(file_path)
-
-            await Aviax.join_call(
+            await Anony.join_call(
                 chat_id,
                 original_chat_id,
-                processed_file,
+                file_path,
                 video=status,
                 image=thumbnail if thumbnail else None,
             )
@@ -408,7 +352,7 @@ async def stream(
                 "video" if video else "audio",
                 forceplay=forceplay,
             )
-            img = await gen_thumb(vidid)
+            img = await get_thumb(vidid)
             button = stream_markup(_, chat_id)
             run = await app.send_photo(
                 original_chat_id,
@@ -423,12 +367,10 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     elif streamtype == "index":
         link = result
         title = "ɪɴᴅᴇx ᴏʀ ᴍ3ᴜ8 ʟɪɴᴋ"
         duration_min = "00:00"
-
         if await is_active_chat(chat_id):
             await put_queue_index(
                 chat_id,
@@ -449,9 +391,7 @@ async def stream(
         else:
             if not forceplay:
                 db[chat_id] = []
-
-            # Live/index stream cannot be modified, pass directly
-            await Aviax.join_call(
+            await Anony.join_call(
                 chat_id,
                 original_chat_id,
                 link,
